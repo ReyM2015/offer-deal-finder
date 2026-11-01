@@ -12,8 +12,8 @@ load_dotenv()
 
 st.set_page_config(page_title="Offer Finder", page_icon="🛍️", layout="wide")
 st.title("🛍️ Offer Finder")
-st.write("Search public web results for product and service offers, review the evidence, and export the results to Excel.")
-st.caption("Web search cannot cover every website. Results depend on the search provider, your query, and pages that are publicly accessible.")
+st.write("Find retailer and deal-site offers, review the source links, and export the results to Excel.")
+st.caption("By default, searches are limited to retailer offer pages and established deal/coupon sites to avoid unrelated social and review pages.")
 
 with st.sidebar:
     st.header("Search settings")
@@ -24,7 +24,8 @@ with st.sidebar:
 
 with st.form("offer_search"):
     query = st.text_input("What are you looking for?", placeholder="Example: noise cancelling headphones sale, tax preparation service discount")
-    domains_text = st.text_input("Optional sites to prioritize", placeholder="amazon.com, bestbuy.com, example.com", help="Comma-separated domains. Leave blank to search broadly.")
+    source_type = st.selectbox("Where should it search?", ["Retailers + deal sites", "Retailers only", "Deal sites only"])
+    domains_text = st.text_input("Additional retailer/deal sites (optional)", placeholder="amazon.com, bestbuy.com, example.com", help="Comma-separated domains to add to the selected sources. Social networks and review sites are filtered out.")
     submitted = st.form_submit_button("Search offers", type="primary")
 
 if submitted:
@@ -33,13 +34,14 @@ if submitted:
     elif not query.strip():
         st.error("Enter a product or service to search for.")
     else:
-        domains = [d.strip().lower().removeprefix("www.") for d in domains_text.split(",") if d.strip()]
+        domains = [d.strip() for d in domains_text.split(",") if d.strip()]
         finder = DealFinder(tavily_key=tavily_key, openai_key=openai_key or None, model=model)
         try:
-            with st.spinner("Searching public web results and reviewing offer details…"):
-                offers = finder.search(query.strip(), max_results=max_results, domains=domains)
+            with st.spinner("Searching retailer and deal-site pages for offers…"):
+                offers = finder.search(query.strip(), max_results=max_results, domains=domains, source_type=source_type)
             st.session_state["offers"] = offers
             st.session_state["search_query"] = query.strip()
+            st.session_state["source_type"] = source_type
             st.session_state["searched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         except Exception as exc:
             st.error(f"Search could not be completed: {exc}")
@@ -47,13 +49,14 @@ if submitted:
 offers = st.session_state.get("offers", [])
 if offers:
     st.subheader(f"Found {len(offers)} possible offers")
-    st.caption(f"Search: {st.session_state.get('search_query', '')} · {st.session_state.get('searched_at', '')}")
+    st.caption(f"Search: {st.session_state.get('search_query', '')} · Sources: {st.session_state.get('source_type', 'Retailers + deal sites')} · {st.session_state.get('searched_at', '')}")
     st.info("Check the offer page before buying. Prices, availability, eligibility, and coupon terms can change. Blank prices mean the page text did not clearly confirm them.")
 
     view_rows = []
     for offer in offers:
         view_rows.append({
             "Product / service": offer["product_name"],
+            "Source site": offer["domain"],
             "Original cost": offer["original_cost"],
             "Discounted cost": offer["discounted_cost"],
             "Discount %": offer["discount_percent"],
@@ -62,6 +65,7 @@ if offers:
             "Evidence / notes": offer["evidence"],
         })
     st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True, column_config={
+        "Source site": st.column_config.TextColumn(help="Only retailer and deal/coupon domains are included by default."),
         "Offer page": st.column_config.LinkColumn(display_text="Open offer"),
         "Discount %": st.column_config.NumberColumn(format="%.1f%%"),
     })
@@ -88,11 +92,11 @@ if offers:
             ws.cell(row, 5).style = "Hyperlink"
     st.download_button("Download Excel file", data=output.getvalue(), file_name=f"offers_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 elif "offers" in st.session_state:
-    st.warning("No likely offers were found. Try a broader query, or add specific retailer domains.")
+    st.warning("No offer pages were found in the selected retailer/deal sources. Try a broader query or add the store’s domain under Additional retailer/deal sites.")
 
 with st.expander("How this agent works and its limits"):
     st.markdown("""
-- Searches public web pages through Tavily; it does not crawl the entire internet or bypass logins, paywalls, robots rules, or anti-bot protections.
+- Searches a curated set of retailer and deal/coupon domains through Tavily. You can select retailer-only or deal-site-only results and add more store domains. It does not crawl the entire internet or bypass logins, paywalls, robots rules, or anti-bot protections.
 - Uses page text returned by search to identify product/service names, list prices, sale prices, and coupon codes.
 - Includes only values supported by the returned text. It calculates the discount percentage when both original and discounted prices are available.
 - Search and AI provider accounts may have usage limits or charges. The app does not store API keys or search history outside the current browser session.

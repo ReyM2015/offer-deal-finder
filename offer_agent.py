@@ -28,6 +28,46 @@ COUPON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The default search is intentionally limited to retailer product pages and
+# established deal/coupon sites. Users can add other stores in the app.
+RETAILER_DOMAINS = {
+    "amazon.com", "walmart.com", "target.com", "bestbuy.com", "costco.com",
+    "homedepot.com", "lowes.com", "kohls.com", "macys.com", "nordstrom.com",
+    "wayfair.com", "staples.com", "officedepot.com", "dell.com", "lenovo.com",
+    "hp.com", "apple.com", "samsung.com", "nike.com", "adidas.com", "rei.com",
+    "chewy.com", "cvs.com", "walgreens.com", "sephora.com", "ulta.com",
+    "bhphotovideo.com", "newegg.com", "ebay.com", "qvc.com", "jcpenney.com",
+    "athome.com", "petsmart.com", "petco.com", "gamestop.com", "ikea.com",
+    "microsoft.com", "adobe.com", "expedia.com", "hotels.com", "groupon.com",
+    "livingsocial.com", "ticketmaster.com", "hellofresh.com", "doordash.com",
+}
+DEAL_SITE_DOMAINS = {
+    "slickdeals.net", "dealnews.com", "techbargains.com", "retailmenot.com",
+    "offers.com", "couponfollow.com", "coupons.com", "dealspotr.com",
+    "bradsdeals.com", "thekrazycouponlady.com", "hip2save.com",
+}
+BLOCKED_DOMAINS = {
+    "facebook.com", "instagram.com", "tiktok.com", "youtube.com", "pinterest.com",
+    "techradar.com", "cnet.com", "tomsguide.com", "pcmag.com",
+}
+DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", re.IGNORECASE)
+
+
+def normalize_domain(value: str) -> str:
+    value = value.strip().lower()
+    if not value:
+        return ""
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = (parsed.hostname or "").strip(".").lower()
+    return host.removeprefix("www.")
+
+
+def is_allowed_domain(host: str, allowed_domains: set[str]) -> bool:
+    host = host.strip(".").lower().removeprefix("www.")
+    if not host or any(host == blocked or host.endswith("." + blocked) for blocked in BLOCKED_DOMAINS):
+        return False
+    return any(host == domain or host.endswith("." + domain) for domain in allowed_domains)
+
 
 def _money_values(text: str) -> set[float]:
     values: set[float] = set()
@@ -59,8 +99,27 @@ class DealFinder:
         self.openai_key = openai_key
         self.model = model
 
-    def search(self, query: str, max_results: int = 10, domains: list[str] | None = None) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        max_results: int = 10,
+        domains: list[str] | None = None,
+        source_type: str = "Retailers + deal sites",
+    ) -> list[dict[str, Any]]:
         search_query = f"{query} deals sale discount coupon promo code"
+        if source_type == "Retailers only":
+            allowed_domains = set(RETAILER_DOMAINS)
+        elif source_type == "Deal sites only":
+            allowed_domains = set(DEAL_SITE_DOMAINS)
+        else:
+            allowed_domains = set(RETAILER_DOMAINS | DEAL_SITE_DOMAINS)
+        for domain in domains or []:
+            normalized = normalize_domain(domain)
+            if DOMAIN_RE.fullmatch(normalized) and not any(
+                normalized == blocked or normalized.endswith("." + blocked)
+                for blocked in BLOCKED_DOMAINS
+            ):
+                allowed_domains.add(normalized)
         payload: dict[str, Any] = {
             "query": search_query,
             "topic": "general",
@@ -68,8 +127,7 @@ class DealFinder:
             "max_results": max_results,
             "include_raw_content": True,
         }
-        if domains:
-            payload["include_domains"] = domains
+        payload["include_domains"] = sorted(allowed_domains)
         response = requests.post(
             "https://api.tavily.com/search",
             json=payload,
@@ -89,6 +147,8 @@ class DealFinder:
             seen_urls.add(url)
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                continue
+            if not is_allowed_domain(parsed.hostname or "", allowed_domains):
                 continue
             title = str(result.get("title", "")).strip()
             content = str(result.get("raw_content") or result.get("content") or "").strip()
