@@ -1,6 +1,8 @@
 import io
 import os
+import re
 from datetime import datetime, timezone
+from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
@@ -52,28 +54,79 @@ if offers:
     st.caption(f"Search: {st.session_state.get('search_query', '')} · Sources: {st.session_state.get('source_type', 'Retailers + deal sites')} · {st.session_state.get('searched_at', '')}")
     st.info("Check the offer page before buying. Prices, availability, eligibility, and coupon terms can change. Blank prices mean the page text did not clearly confirm them.")
 
-    view_rows = []
-    for offer in offers:
-        view_rows.append({
-            "Product / service": offer["product_name"],
-            "Source site": offer["domain"],
-            "Original cost": offer["original_cost"],
-            "Discounted cost": offer["discounted_cost"],
-            "Discount %": offer["discount_percent"],
-            "Coupon": offer["coupon_code"] or "",
-            "Offer page": offer["site_link"],
-            "Evidence / notes": offer["evidence"],
-        })
-    st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True, column_config={
-        "Source site": st.column_config.TextColumn(help="Only retailer and deal/coupon domains are included by default."),
-        "Offer page": st.column_config.LinkColumn(display_text="Open offer"),
-        "Discount %": st.column_config.NumberColumn(format="%.1f%%"),
-    })
+    stated_discounts = [float(x["discount_percent"]) for x in offers if isinstance(x.get("discount_percent"), (int, float))]
+    filter_a, filter_b, filter_c = st.columns([1, 1, 2])
+    with filter_a:
+        coupon_only = st.checkbox("Coupon code found")
+    with filter_b:
+        prices_only = st.checkbox("Both prices found")
+    with filter_c:
+        sort_by = st.selectbox("Sort offers", ["Largest stated discount", "Lowest sale price", "Most complete offer"])
+
+    visible_offers = [
+        x for x in offers
+        if (not coupon_only or bool(x.get("coupon_code")))
+        and (not prices_only or (x.get("original_cost") is not None and x.get("discounted_cost") is not None))
+    ]
+    if sort_by == "Lowest sale price":
+        visible_offers.sort(key=lambda x: (x.get("discounted_cost") is None, x.get("discounted_cost") or float("inf")))
+    elif sort_by == "Most complete offer":
+        visible_offers.sort(
+            key=lambda x: (
+                x.get("original_cost") is not None and x.get("discounted_cost") is not None,
+                bool(x.get("coupon_code")),
+                x.get("discount_percent") or -1,
+            ),
+            reverse=True,
+        )
+    else:
+        visible_offers.sort(key=lambda x: x.get("discount_percent") if x.get("discount_percent") is not None else -1, reverse=True)
+
+    st.caption(f"Showing {len(visible_offers)} of {len(offers)} offers")
+
+    if not visible_offers:
+        st.info("No offers match those filters. Clear one or both filters to see the search results.")
+
+    # Compare offers only when the extracted product names match exactly; this
+    # avoids claiming different models or sizes are the same product.
+    exact_matches = defaultdict(list)
+    for offer in visible_offers:
+        key = re.sub(r"[^a-z0-9]+", " ", offer.get("product_name", "").casefold()).strip()
+        if key and offer.get("discounted_cost") is not None:
+            exact_matches[key].append(offer)
+    comparisons = [items for items in exact_matches.values() if len(items) > 1]
+    if comparisons:
+        with st.expander("Compare matching product names across stores"):
+            for items in comparisons:
+                items.sort(key=lambda x: x["discounted_cost"])
+                st.markdown(f"**{items[0]['product_name']}**")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Store / deal site": x["domain"],
+                        "Price shown": x["discounted_cost"],
+                        "Offer page": x["site_link"],
+                    } for x in items]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"Offer page": st.column_config.LinkColumn(display_text="Open offer")},
+                )
+
+    for offer in visible_offers:
+        with st.container(border=True):
+            st.markdown(f"### {offer['product_name']}")
+            st.caption(f"Source: {offer['domain']}")
+            price_col, old_col, discount_col, coupon_col = st.columns(4)
+            price_col.metric("Price shown", f"${offer['discounted_cost']:,.2f}" if offer["discounted_cost"] is not None else "Not found")
+            old_col.metric("Original price", f"${offer['original_cost']:,.2f}" if offer["original_cost"] is not None else "Not found")
+            discount_col.metric("Stated discount", f"{offer['discount_percent']:.1f}%" if offer["discount_percent"] is not None else "Not confirmed")
+            coupon_col.metric("Coupon", offer["coupon_code"] or "None found")
+            st.caption(offer["evidence"])
+            st.link_button("Open offer page", offer["site_link"])
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_rows = []
-        for offer in offers:
+        for offer in visible_offers:
             row = {column: offer.get(key, "") for column, key in zip(OFFER_COLUMNS, ("product_name", "original_cost", "discounted_cost", "discount_percent", "site_link", "coupon_code"))}
             if isinstance(row["% of discount"], (int, float)):
                 row["% of discount"] = row["% of discount"] / 100
@@ -100,4 +153,6 @@ with st.expander("How this agent works and its limits"):
 - Uses page text returned by search to identify product/service names, list prices, sale prices, and coupon codes.
 - Includes only values supported by the returned text. It calculates the discount percentage when both original and discounted prices are available.
 - Search and AI provider accounts may have usage limits or charges. The app does not store API keys or search history outside the current browser session.
+- Cross-store comparisons group exact extracted product names only. Check model numbers, sizes, and variants on the retailer page before treating two prices as the same item.
+- Persistent price history, background deal alerts, and shared community voting require a database and notification service; they are not part of this browser-session version.
 """)
